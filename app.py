@@ -1857,7 +1857,6 @@ def main():
             default=[],
             key="health_profiles",
         )
-        st.session_state["health_profiles"] = selected_health_profiles
 
         st.divider()
         st.markdown('<div class="sidebar-eyebrow">Accessibility</div>', unsafe_allow_html=True)
