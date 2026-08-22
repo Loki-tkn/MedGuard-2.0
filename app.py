@@ -1,16 +1,25 @@
 import os
 import io
+import re
 import json
 import textwrap
 import time
+import base64
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import requests
 import pandas as pd
 import cv2
 import streamlit as st
+
+# Safe import for gTTS (voice readout)
+try:
+    from gtts import gTTS
+    GTTS_AVAILABLE = True
+except ImportError:
+    GTTS_AVAILABLE = False
 
 
 def render_html_safely(html_content: str):
@@ -838,6 +847,18 @@ SUSPICIOUS_PATTERNS = [
     "không cần đơn", "cải thiện ngay", "thần kỳ", "bách bệnh", "100%"
 ]
 
+_VN_SDK_PATTERN = re.compile(
+    r'\b(VD|VS|GC|VN)-\d{5}-\d{2}\b',
+    re.IGNORECASE
+)
+
+
+def extract_vietnam_registration_code(text: str) -> list:
+    """Extract official Vietnamese Ministry of Health (SĐK) registration codes."""
+    if not text:
+        return []
+    return _VN_SDK_PATTERN.findall(text)
+
 
 def run_claim_audit(text: str) -> list:
     if not text:
@@ -846,10 +867,21 @@ def run_claim_audit(text: str) -> list:
     return [p for p in SUSPICIOUS_PATTERNS if p.lower() in text_lower]
 
 
-def get_credibility_score(match_type, external_data, lang="en"):
+def get_credibility_score(match_type, external_data, lang="en", ocr_text="", barcodes=None):
     s = MIL_STRINGS[lang]
     has_fda  = bool(external_data and (external_data.get("openfda") or external_data.get("dailymed")))
     has_wiki = bool(external_data and (external_data.get("wikipedia") or external_data.get("wikipedia_en")))
+    # Check for VN SDK in OCR text
+    vn_codes = extract_vietnam_registration_code(ocr_text or "")
+    has_gs1  = bool(barcodes)
+    has_suspicious = bool(run_claim_audit(ocr_text or ""))
+    # VERY HIGH: SĐK or GS1 barcode present
+    if vn_codes or (match_type in ("BARCODE", "NDC_MATCH") and has_gs1):
+        label = "VERY HIGH / MOH VERIFIED" if vn_codes else s["cred_high"]
+        return label, "#059669", "🟢", s["cred_high_desc"]
+    # Downgrade: suspicious marketing claims found
+    if has_suspicious and not has_fda:
+        return "LOW / EXAGGERATED CLAIMS", "#DC2626", "🔴", "Suspicious marketing phrases detected — verify before use"
     if match_type in ("BARCODE", "NDC_MATCH") or has_fda:
         return s["cred_high"], "#20B26C", "🟢", s["cred_high_desc"]
     elif match_type in ("FUZZY_OCR", "RXNORM_MATCH") and (has_wiki or has_fda):
@@ -860,9 +892,9 @@ def get_credibility_score(match_type, external_data, lang="en"):
         return s["cred_low"], "#DC2626", "🔴", s["cred_low_desc"]
 
 
-def render_credibility_badge(match_type, external_data, lang="en"):
+def render_credibility_badge(match_type, external_data, lang="en", ocr_text="", barcodes=None):
     s = MIL_STRINGS[lang]
-    label, color, emoji, desc = get_credibility_score(match_type, external_data, lang)
+    label, color, emoji, desc = get_credibility_score(match_type, external_data, lang, ocr_text=ocr_text, barcodes=barcodes)
     html = (
         f'<div style="display:inline-flex;align-items:center;gap:8px;background:#FFFFFF;'
         f'border:1px solid {color};border-radius:9999px;padding:6px 16px;margin:0.75rem 0;box-shadow:0 2px 8px rgba(0,0,0,0.04);">'
@@ -1294,6 +1326,367 @@ def match_medicine_extended(barcodes: list, ocr_text: str, database_df: pd.DataF
 
 
 # ==========================================
+# NEW FEATURES: X-RAY LENS, ALLERGY, DEBUNK, INTERACTIONS, VOICE
+# ==========================================
+
+# Allergy / health risk profiles
+ALLERGY_PROFILES = {
+    "Paracetamol (Acetaminophen) Allergy": ["paracetamol", "acetaminophen", "tylenol"],
+    "NSAID / Ibuprofen Allergy": ["ibuprofen", "naproxen", "aspirin", "diclofenac", "nsaid"],
+    "Penicillin / Amoxicillin Allergy": ["amoxicillin", "penicillin", "ampicillin", "amoxiclav"],
+    "Sulfonamide Allergy": ["sulfamethoxazole", "trimethoprim", "sulfa"],
+    "Peptic Ulcer Risk": ["ibuprofen", "aspirin", "naproxen", "diclofenac", "corticosteroid"],
+    "High Blood Pressure": ["pseudoephedrine", "phenylephrine", "decongestant", "ephedrine"],
+    "Pregnancy (avoid)": ["ibuprofen", "naproxen", "aspirin", "tetracycline", "retinoid", "methotrexate"],
+    "Kidney Disease": ["nsaid", "ibuprofen", "naproxen", "nephrotoxic"],
+    "Liver Disease": ["paracetamol", "acetaminophen", "hepatotoxic"],
+}
+
+DRUG_INTERACTION_DB = {
+    ("Paracetamol", "Warfarin"): {"risk": 72, "level": "HIGH", "advice": "Paracetamol can increase anticoagulant effect of Warfarin. Monitor INR closely."},
+    ("Paracetamol", "Alcohol"): {"risk": 85, "level": "HIGH", "advice": "Combined use significantly increases hepatotoxicity risk. Avoid alcohol."},
+    ("Ibuprofen", "Aspirin"): {"risk": 68, "level": "MODERATE", "advice": "NSAIDs can reduce aspirin's cardioprotective effect. Consult physician."},
+    ("Ibuprofen", "Warfarin"): {"risk": 78, "level": "HIGH", "advice": "Ibuprofen potentiates bleeding risk with anticoagulants. Avoid co-use."},
+    ("Amoxicillin", "Warfarin"): {"risk": 55, "level": "MODERATE", "advice": "Some antibiotics may alter gut flora and affect Warfarin metabolism."},
+    ("Metformin", "Alcohol"): {"risk": 60, "level": "MODERATE", "advice": "Risk of lactic acidosis. Limit alcohol while on Metformin."},
+    ("Aspirin", "Warfarin"): {"risk": 90, "level": "VERY HIGH", "advice": "Extremely high bleeding risk. Avoid combination without specialist supervision."},
+    ("Ciprofloxacin", "Antacid"): {"risk": 50, "level": "MODERATE", "advice": "Antacids reduce ciprofloxacin absorption. Take 2 hours apart."},
+    ("Simvastatin", "Erythromycin"): {"risk": 75, "level": "HIGH", "advice": "Erythromycin increases statin blood levels, raising myopathy risk."},
+    ("Clopidogrel", "Omeprazole"): {"risk": 65, "level": "MODERATE", "advice": "Omeprazole may reduce clopidogrel's antiplatelet effect. Use pantoprazole instead."},
+}
+
+COMMON_DRUGS_FOR_SIMULATOR = [
+    "Paracetamol", "Ibuprofen", "Aspirin", "Amoxicillin", "Metformin",
+    "Warfarin", "Alcohol", "Ciprofloxacin", "Antacid", "Simvastatin",
+    "Erythromycin", "Clopidogrel", "Omeprazole", "Diclofenac", "Cetirizine",
+]
+
+DEBUNK_FEED = [
+    {
+        "drug": "Th\u1ea7n D\u01b0\u1ee3c X\u01b0\u01a1ng Kh\u1edbp",
+        "claim": "Ch\u1eefa 100% b\u1ec7nh x\u01b0\u01a1ng kh\u1edbp trong 7 ng\u00e0y",
+        "verdict": "\u274c GI\u1ea2 M\u1ea0O",
+        "color": "#DC2626",
+        "reason": "Kh\u00f4ng c\u00f3 s\u1ed1 \u0111\u0103ng k\u00fd VD/VS. Tuy\u00ean b\u1ed1 ch\u1eefa kh\u1ecfi 100% vi ph\u1ea1m lu\u1eadt qu\u1ea3ng c\u00e1o d\u01b0\u1ee3c ph\u1ea9m.",
+        "reports": 142,
+        "date": "2026-08-15",
+    },
+    {
+        "drug": "NaturePower Detox Plus",
+        "claim": "No side effects, cures all toxins in body",
+        "verdict": "\u26a0\ufe0f UNVERIFIED",
+        "color": "#D97706",
+        "reason": "No GS1 barcode. No FDA registration. 'No side effects' claim flagged.",
+        "reports": 87,
+        "date": "2026-08-18",
+    },
+    {
+        "drug": "Th\u1ea3o D\u01b0\u1ee3c B\u00e1ch B\u1ec7nh",
+        "claim": "Th\u1ea7n k\u1ef3, ch\u1eefa b\u00e1ch b\u1ec7nh, kh\u00f4ng c\u1ea7n \u0111\u01a1n thu\u1ed1c",
+        "verdict": "\u274c GI\u1ea2 M\u1ea0O",
+        "color": "#DC2626",
+        "reason": "C\u1ee5m t\u1eeb b\u1ecb c\u1ea5m theo Th\u00f4ng t\u01b0 09/2015/TT-BYT. Kh\u00f4ng t\u00ecm th\u1ea5y trong c\u01a1 s\u1edf d\u1eef li\u1ec7u B\u1ed9 Y t\u1ebf.",
+        "reports": 231,
+        "date": "2026-08-20",
+    },
+    {
+        "drug": "Slim Fast Wonder Pill VN",
+        "claim": "Guaranteed weight loss 10kg in 2 weeks",
+        "verdict": "\u274c FAKE",
+        "color": "#DC2626",
+        "reason": "Product not found in OpenFDA or MOH database. Guaranteed claims are illegal.",
+        "reports": 56,
+        "date": "2026-08-22",
+    },
+]
+
+
+def annotate_xray_lens(
+    image: Image.Image,
+    barcodes: list,
+    ocr_text: str,
+    ocr_results: list,
+    matched_med: dict,
+    allergy_profiles: list,
+) -> Image.Image:
+    """
+    'X-Ray Lens' overlay: draws colored bounding boxes on the image.
+    Green  = detected SĐK/GS1 barcode
+    Red    = suspicious/fake marketing keywords
+    Yellow = active ingredients matching user allergy profile
+    """
+    annotated = image.convert("RGB").copy()
+    draw = ImageDraw.Draw(annotated, "RGBA")
+
+    # Determine allergy-flagged ingredient keywords
+    allergy_keywords = set()
+    for profile in (allergy_profiles or []):
+        kws = ALLERGY_PROFILES.get(profile, [])
+        allergy_keywords.update(kws)
+
+    suspicious_lower = [p.lower() for p in SUSPICIOUS_PATTERNS]
+    active_ing_lower = ""
+    if matched_med:
+        active_ing_lower = str(matched_med.get("active_ingredient", "")).lower()
+
+    for bbox, text, prob in (ocr_results or []):
+        if prob < 0.2:
+            continue
+        text_lower = text.lower()
+        pts = [(int(p[0]), int(p[1])) for p in bbox]
+        x_vals = [p[0] for p in pts]
+        y_vals = [p[1] for p in pts]
+        x0, y0, x1, y1 = min(x_vals), min(y_vals), max(x_vals), max(y_vals)
+
+        # Check VN SDK codes in text
+        vn_codes_in_text = _VN_SDK_PATTERN.findall(text)
+        # Check suspicious claims
+        is_suspicious = any(sp in text_lower for sp in suspicious_lower)
+        # Check allergy match
+        is_allergy = any(ak in text_lower for ak in allergy_keywords) or (
+            allergy_keywords and any(ak in active_ing_lower for ak in allergy_keywords)
+        )
+
+        if vn_codes_in_text:
+            # Green box for VN SDK
+            draw.rectangle([x0 - 3, y0 - 3, x1 + 3, y1 + 3], outline=(5, 150, 105, 255), width=4)
+            draw.rectangle([x0 - 3, y0 - 3, x1 + 3, y1 + 3], fill=(5, 150, 105, 30))
+        elif is_allergy:
+            # Yellow box for allergy
+            draw.rectangle([x0 - 3, y0 - 3, x1 + 3, y1 + 3], outline=(234, 179, 8, 255), width=4)
+            draw.rectangle([x0 - 3, y0 - 3, x1 + 3, y1 + 3], fill=(234, 179, 8, 40))
+        elif is_suspicious:
+            # Red box for suspicious claims
+            draw.rectangle([x0 - 3, y0 - 3, x1 + 3, y1 + 3], outline=(220, 38, 38, 255), width=4)
+            draw.rectangle([x0 - 3, y0 - 3, x1 + 3, y1 + 3], fill=(220, 38, 38, 40))
+
+    # Draw green boxes around barcode regions
+    for b in (barcodes or []):
+        if b.get("rect"):
+            x, y, w, h = b["rect"]
+            draw.rectangle([x - 4, y - 4, x + w + 4, y + h + 4], outline=(5, 150, 105, 255), width=5)
+
+    return annotated
+
+
+def check_allergy_risk(matched_med: dict, ocr_text: str, selected_profiles: list) -> list:
+    """Returns list of (profile_name, matched_keyword) tuples for detected risks."""
+    risks = []
+    if not selected_profiles:
+        return risks
+    combined_text = ""
+    if matched_med:
+        combined_text += str(matched_med.get("active_ingredient", "")).lower() + " "
+        combined_text += str(matched_med.get("drug_name", "")).lower() + " "
+        combined_text += str(matched_med.get("contraindications", "")).lower() + " "
+    combined_text += (ocr_text or "").lower()
+    for profile in selected_profiles:
+        keywords = ALLERGY_PROFILES.get(profile, [])
+        for kw in keywords:
+            if kw in combined_text:
+                risks.append((profile, kw))
+                break
+    return risks
+
+
+def generate_debunk_card(drug_name: str, match_type, confidence, flagged_phrases: list, vn_codes: list) -> bytes:
+    """Generate a downloadable PNG debunk infographic card using PIL."""
+    W, H = 800, 420
+    img = Image.new("RGB", (W, H), color="#1A1A2E")
+    draw = ImageDraw.Draw(img)
+
+    # Background gradient simulation via rectangles
+    for i in range(H):
+        ratio = i / H
+        r = int(26 + ratio * 15)
+        g = int(26 + ratio * 10)
+        b = int(46 + ratio * 30)
+        draw.line([(0, i), (W, i)], fill=(r, g, b))
+
+    # Header band
+    draw.rectangle([0, 0, W, 70], fill="#DC2626")
+    draw.text((20, 18), "⚠  MedGuard AUDIT REPORT", fill="white")
+
+    # Status
+    if vn_codes:
+        status_text = f"✅ VERIFIED — SĐK: {', '.join(vn_codes)}"
+        status_color = "#10B981"
+    elif match_type in ("BARCODE", "NDC_MATCH"):
+        status_text = f"✅ BARCODE VERIFIED ({confidence}%)"
+        status_color = "#10B981"
+    else:
+        status_text = "❌ UNVERIFIED — NOT IN MOH / FDA DATABASE"
+        status_color = "#EF4444"
+
+    draw.rectangle([20, 90, W - 20, 160], fill="#16213E", outline=status_color, width=3)
+    draw.text((35, 100), f"Drug: {drug_name[:60]}", fill="#FFFFFF")
+    draw.text((35, 128), f"Status: {status_text}", fill=status_color)
+
+    # Suspicious phrases
+    y_cursor = 180
+    if flagged_phrases:
+        draw.text((20, y_cursor), "🚩 FLAGGED PHRASES:", fill="#FCA5A5")
+        y_cursor += 28
+        for ph in flagged_phrases[:5]:
+            draw.text((35, y_cursor), f"• \"{ph}\"", fill="#FECACA")
+            y_cursor += 24
+    else:
+        draw.text((20, y_cursor), "✅ No suspicious marketing claims detected.", fill="#6EE7B7")
+        y_cursor += 30
+
+    # Footer
+    draw.rectangle([0, H - 50, W, H], fill="#0F0F23")
+    draw.text((20, H - 32), "MedGuard v2.0 | Hackathon Edition | medguard.app", fill="#64748B")
+    draw.text((W - 220, H - 32), "NOT FOR CLINICAL USE", fill="#94A3B8")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf.read()
+
+
+def generate_voice_summary(matched_med: dict, ocr_text: str, flagged: list, lang: str = "en") -> bytes | None:
+    """Generate a gTTS audio summary. Returns audio bytes or None."""
+    if not GTTS_AVAILABLE:
+        return None
+    try:
+        drug_name = matched_med.get("drug_name", "Unknown") if matched_med else "Unknown"
+        active = matched_med.get("active_ingredient", "N/A") if matched_med else "N/A"
+        dosage = matched_med.get("dosage", "N/A") if matched_med else "N/A"
+        if lang == "vi":
+            summary = (
+                f"Kết quả kiểm tra thuốc: {drug_name}. "
+                f"Hoạt chất: {active}. "
+                f"Liều dùng: {dosage}. "
+            )
+            if flagged:
+                summary += f"Cảnh báo: Phát hiện {len(flagged)} cụm từ đáng ngờ trong nhãn thuốc. "
+            summary += "Vui lòng tham khảo ý kiến bác sĩ hoặc dược sĩ trước khi sử dụng."
+            tts_lang = "vi"
+        else:
+            summary = (
+                f"Medicine verification result: {drug_name}. "
+                f"Active ingredient: {active}. "
+                f"Dosage: {dosage}. "
+            )
+            if flagged:
+                summary += f"Warning: {len(flagged)} suspicious marketing claim(s) detected on the label. "
+            summary += "Please consult a pharmacist or doctor before use."
+            tts_lang = "en"
+
+        tts = gTTS(text=summary, lang=tts_lang, slow=False)
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        buf.seek(0)
+        return buf.read()
+    except Exception:
+        return None
+
+
+def render_debunk_feed():
+    """Render the public community debunk feed tab."""
+    st.markdown("### 📢 Community Debunk Feed")
+    st.caption("Live-simulated public alert feed of suspicious or unregistered products reported by the community.")
+    for item in DEBUNK_FEED:
+        color = item["color"]
+        st.markdown(
+            f"""
+<div style="background:#1E1E2E;border-left:5px solid {color};border-radius:12px;
+     padding:1rem 1.25rem;margin-bottom:1rem;color:#E2E8F0;">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <span style="font-weight:800;font-size:1.05rem;color:#F1F5F9;">💊 {item['drug']}</span>
+    <span style="background:{color};color:white;font-size:0.75rem;padding:3px 10px;
+           border-radius:9999px;font-weight:700;">{item['verdict']}</span>
+  </div>
+  <div style="margin-top:0.4rem;font-size:0.88rem;color:#94A3B8;font-style:italic;">
+    Claim: "{item['claim']}"
+  </div>
+  <div style="margin-top:0.5rem;font-size:0.88rem;color:#CBD5E1;">{item['reason']}</div>
+  <div style="margin-top:0.5rem;font-size:0.78rem;color:#64748B;">
+    🚨 {item['reports']} community reports · 📅 {item['date']}
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+
+def render_interaction_simulator(key_prefix: str = "default"):
+    """Render the Drug Interaction Simulator tab."""
+    st.markdown("### 💊 Drug Interaction Simulator")
+    st.caption("Select 2 or more drugs to compute interaction risk matrix with clinical advice.")
+
+    selected = st.multiselect(
+        "Select drugs to simulate interactions:",
+        options=COMMON_DRUGS_FOR_SIMULATOR,
+        default=["Paracetamol", "Warfarin"],
+        key=f"drug_sim_{key_prefix}",
+        max_selections=6,
+    )
+
+    if len(selected) < 2:
+        st.info("Select at least 2 drugs to compute interactions.")
+        return
+
+    st.markdown("#### 🔬 Interaction Risk Matrix")
+    matrix_data = []
+    found_any = False
+    for i in range(len(selected)):
+        for j in range(i + 1, len(selected)):
+            d1, d2 = selected[i], selected[j]
+            interaction = (
+                DRUG_INTERACTION_DB.get((d1, d2))
+                or DRUG_INTERACTION_DB.get((d2, d1))
+            )
+            if interaction:
+                found_any = True
+                risk = interaction["risk"]
+                level = interaction["level"]
+                advice = interaction["advice"]
+                level_color = {
+                    "VERY HIGH": "#DC2626",
+                    "HIGH": "#EA580C",
+                    "MODERATE": "#D97706",
+                    "LOW": "#16A34A",
+                }.get(level, "#64748B")
+                matrix_data.append({
+                    "Drug A": d1,
+                    "Drug B": d2,
+                    "Risk %": risk,
+                    "Level": level,
+                    "Clinical Advice": advice,
+                })
+                st.markdown(
+                    f"""<div style="background:#1E1E2E;border-left:5px solid {level_color};
+                         border-radius:10px;padding:0.9rem 1.1rem;margin-bottom:0.75rem;color:#E2E8F0;">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <span style="font-weight:700;font-size:1rem;">⚡ {d1} × {d2}</span>
+    <span style="background:{level_color};color:white;font-size:0.75rem;padding:3px 10px;
+           border-radius:9999px;font-weight:700;">{level} — {risk}% risk</span>
+  </div>
+  <div style="margin-top:0.5rem;font-size:0.88rem;color:#CBD5E1;">{advice}</div>
+  <div style="height:8px;background:#334155;border-radius:4px;margin-top:0.75rem;">
+    <div style="height:8px;background:{level_color};border-radius:4px;width:{risk}%;"></div>
+  </div>
+</div>""",
+                    unsafe_allow_html=True,
+                )
+            else:
+                matrix_data.append({
+                    "Drug A": d1,
+                    "Drug B": d2,
+                    "Risk %": "N/A",
+                    "Level": "Unknown",
+                    "Clinical Advice": "No interaction data found in local database.",
+                })
+
+    if not found_any:
+        st.success("✅ No known major interactions found for the selected drug combination in the database.")
+
+    with st.expander("📊 View Full Matrix Table"):
+        st.dataframe(pd.DataFrame(matrix_data), use_container_width=True, hide_index=True)
+
+
+# ==========================================
 # MAIN APPLICATION INTERFACE
 # ==========================================
 
@@ -1455,12 +1848,48 @@ def main():
         )
 
         st.divider()
-        st.caption("MedGuard v1.3 • Healthy Mint Light Theme")
+        st.markdown('<div class="sidebar-eyebrow">Health Profile</div>', unsafe_allow_html=True)
+        st.header("🩺 My Health & Allergy Profile")
+        st.caption("Select conditions to get personalized risk warnings on scanned medicines.")
+        selected_health_profiles = st.multiselect(
+            "Active conditions / allergies:",
+            options=list(ALLERGY_PROFILES.keys()),
+            default=[],
+            key="health_profiles",
+        )
+        st.session_state["health_profiles"] = selected_health_profiles
 
-    tab_scan, tab_camera, tab_search = st.tabs([
-        "🖼️ Scan Uploaded Image", 
-        "📷 Live Camera Barcode", 
-        "🔍 Manual Search & OpenFDA"
+        st.divider()
+        st.markdown('<div class="sidebar-eyebrow">Accessibility</div>', unsafe_allow_html=True)
+        st.header("♿ Accessibility")
+        senior_mode = st.toggle(
+            "Senior-Friendly Mode (Large Text + High Contrast)",
+            value=st.session_state.get("senior_mode", False),
+            key="senior_mode_toggle",
+        )
+        st.session_state["senior_mode"] = senior_mode
+        if GTTS_AVAILABLE:
+            st.caption("🔊 Voice readout available — click 'Read Aloud' after scanning.")
+        else:
+            st.caption("🔇 Voice readout unavailable (install gTTS: `pip install gtts`).")
+
+        if senior_mode:
+            st.markdown("""
+<style>
+  html, body, [class*="css"] { font-size: 20px !important; }
+  .field-value { font-size: 1.2rem !important; }
+  .stButton > button { font-size: 1.1rem !important; padding: 0.7rem 2rem !important; }
+</style>""", unsafe_allow_html=True)
+
+        st.divider()
+        st.caption("MedGuard v2.0 • Hackathon Edition")
+
+    tab_scan, tab_camera, tab_search, tab_interactions, tab_debunk = st.tabs([
+        "🖼️ Scan Uploaded Image",
+        "📷 Live Camera Barcode",
+        "🔍 Manual Search & OpenFDA",
+        "⚡ Drug Interaction Simulator",
+        "📢 Debunk Feed",
     ])
 
     # TAB 1: UPLOAD & SCAN
@@ -1475,7 +1904,7 @@ def main():
         if uploaded_file:
             try:
                 img = Image.open(uploaded_file).convert("RGB")
-                
+
                 col1, col2 = st.columns([1, 1])
                 with col1:
                     st.image(img, caption="Original Uploaded Image", use_container_width=True)
@@ -1503,14 +1932,80 @@ def main():
 
                     external_data = fetch_all_external_apis(brand_query, generic_query)
 
+                # --- VN SDK Detection ---
+                vn_codes = extract_vietnam_registration_code(ocr_text)
+                if vn_codes:
+                    st.markdown(
+                        f'<div style="background:#D1FAE5;border:2px solid #059669;border-radius:12px;'
+                        f'padding:0.75rem 1rem;margin-bottom:0.75rem;font-weight:700;color:#065F46;font-size:1rem;">'
+                        f'\u2705 Vietnamese Ministry of Health S\u0110K Found: {", ".join(vn_codes)}'
+                        f' — OFFICIAL REGISTRATION CONFIRMED</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                # --- Allergy / Health Risk Banner ---
+                active_profiles = st.session_state.get("health_profiles", [])
+                allergy_risks = check_allergy_risk(matched_med, ocr_text, active_profiles)
+                if allergy_risks:
+                    risk_lines = "\n".join([f"• **{p}** (detected: `{kw}`)"
+                                            for p, kw in allergy_risks])
+                    st.markdown(
+                        f'<div style="background:#FEE2E2;border:2px solid #DC2626;border-radius:12px;'
+                        f'padding:1rem 1.25rem;margin-bottom:1rem;">'
+                        f'<span style="font-size:1.3rem;">\u26a0\ufe0f</span> '
+                        f'<strong style="color:#B91C1C;font-size:1.05rem;">'
+                        f'PERSONALIZED ALLERGY / HEALTH RISK DETECTED</strong><br/>'
+                        f'<span style="color:#7F1D1D;font-size:0.92rem;">'
+                        f'This medicine may conflict with your health profile:</span>'
+                        f'<div style="margin-top:0.5rem;color:#991B1B;">{risk_lines.replace(chr(10), "<br/>")}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                # --- X-Ray Lens Annotated Image ---
                 with col2:
-                    st.subheader("🎯 Visual Detection Overlay")
-                    if barcodes:
-                        st.image(barcode_annotated_img, caption="✅ OpenCV Barcode / QR Detected (Green)", use_container_width=True)
-                    else:
-                        st.image(ocr_annotated_img, caption="🔤 OCR Text Regions Highlighted (Blue)", use_container_width=True)
+                    st.subheader("🔬 X-Ray Lens Overlay")
+                    xray_img = annotate_xray_lens(
+                        image=img,
+                        barcodes=barcodes,
+                        ocr_text=ocr_text,
+                        ocr_results=ocr_results,
+                        matched_med=matched_med,
+                        allergy_profiles=active_profiles,
+                    )
+                    st.image(xray_img, caption="🟢 Green=SDK/Barcode  🔴 Red=Suspicious  🟡 Yellow=Allergy",
+                             use_container_width=True)
+                    st.caption("Bounding boxes highlight verified codes (green), suspicious claims (red), and allergy-flagged ingredients (yellow).")
 
                 st.divider()
+
+                # --- Debunk Card Download ---
+                flagged_claims = run_claim_audit(ocr_text)
+                drug_name_for_card = (matched_med or {}).get("drug_name", ocr_text[:40] or "Unknown")
+                debunk_png = generate_debunk_card(
+                    drug_name=drug_name_for_card,
+                    match_type=match_type,
+                    confidence=confidence,
+                    flagged_phrases=flagged_claims,
+                    vn_codes=vn_codes,
+                )
+                st.download_button(
+                    label="📥 Download Audit Infographic (PNG)",
+                    data=debunk_png,
+                    file_name=f"medguard_audit_{drug_name_for_card[:20].replace(' ', '_')}.png",
+                    mime="image/png",
+                    key="debunk_dl_scan",
+                )
+
+                # --- Voice Readout ---
+                if GTTS_AVAILABLE:
+                    if st.button("🔊 Read Aloud Safety Summary", key="voice_scan"):
+                        with st.spinner("Generating audio summary..."):
+                            audio_bytes = generate_voice_summary(matched_med, ocr_text, flagged_claims, lang=lang)
+                        if audio_bytes:
+                            st.audio(audio_bytes, format="audio/mp3")
+                        else:
+                            st.warning("Could not generate audio. Check gTTS installation.")
 
                 render_verification_results(
                     matched_med=matched_med,
@@ -1642,6 +2137,14 @@ def main():
             st.dataframe(database_df, use_container_width=True)
 
     render_disclaimer_banner(lang=lang)
+
+    # TAB 4: DRUG INTERACTION SIMULATOR
+    with tab_interactions:
+        render_interaction_simulator(key_prefix="main")
+
+    # TAB 5: COMMUNITY DEBUNK FEED
+    with tab_debunk:
+        render_debunk_feed()
 
 
 # ==========================================
