@@ -1521,6 +1521,7 @@ def main():
                     ocr_text=ocr_text,
                     external_data=external_data,
                     lang=lang,
+                    key_prefix="scan",
                 )
 
             except Exception as e:
@@ -1587,6 +1588,7 @@ def main():
                     ocr_text=ocr_text,
                     external_data=external_data,
                     lang=lang,
+                    key_prefix="camera",
                 )
 
             except Exception as e:
@@ -1606,7 +1608,7 @@ def main():
                 external_direct = fetch_all_external_apis(search_query, search_query)
             
             render_external_data_cards(external_direct)
-            render_ai_assistant_section(None, external_direct, lang=lang)
+            render_ai_assistant_section(None, external_direct, lang=lang, key_prefix="search")
 
         st.divider()
         st.markdown("#### 📚 Local / Remote Verified Records")
@@ -1789,7 +1791,7 @@ def call_anthropic(system_prompt: str, user_prompt: str, api_key: str, model: st
         return None, f"Unexpected error: {e}"
 
 
-def call_groq(system_prompt: str, user_prompt: str, api_key: str, model: str = "llama-3.3-70b-versatile"):
+def call_groq(system_prompt: str, user_prompt: str, api_key: str, model: str = "openai/gpt-oss-20b"):
     """Minimal REST call to the Groq API (OpenAI-compatible format). Returns (text, error)."""
     if not api_key:
         return None, "No API key provided."
@@ -1875,11 +1877,16 @@ def simplify_ai_explanation(context: str, provider: str, api_key: str, lang: str
     return call_ai(system_prompt, user_prompt, provider, api_key)
 
 
-def render_ai_assistant_section(matched_med, external_data, lang="en"):
+def render_ai_assistant_section(matched_med, external_data, lang="en", key_prefix="default"):
     """
     Renders the optional AI Q&A + simplify-explanation UI. Silently does
     nothing (no API calls, no hallucination risk) if there's no verified
     context to ground on, or no user-supplied API key.
+
+    `key_prefix` must be a stable string unique per call site (e.g. "scan",
+    "camera", "search") — NOT derived from id(), since id() of a freshly
+    built string changes on every Streamlit rerun and would silently break
+    button clicks (the click event stops matching the widget key).
     """
     context = build_medicine_context(matched_med, external_data)
     provider = st.session_state.get("ai_provider", "Google Gemini")
@@ -1905,13 +1912,13 @@ def render_ai_assistant_section(matched_med, external_data, lang="en"):
         with col_a:
             question = st.text_input(
                 "Ask a question about this medicine:",
-                key=f"ai_q_{id(context)}",
+                key=f"ai_q_{key_prefix}",
                 placeholder="e.g. Can I take this on an empty stomach?"
             )
         with col_b:
             st.write("")
             st.write("")
-            ask_clicked = st.button("Ask", key=f"ai_ask_btn_{id(context)}")
+            ask_clicked = st.button("Ask", key=f"ai_ask_btn_{key_prefix}")
 
         if ask_clicked and question.strip():
             with st.spinner(f"Asking {provider} (grounded on verified data only)..."):
@@ -1923,7 +1930,7 @@ def render_ai_assistant_section(matched_med, external_data, lang="en"):
 
         st.divider()
 
-        if st.button("🪄 Explain this medicine in simple terms", key=f"ai_simplify_btn_{id(context)}"):
+        if st.button("🪄 Explain this medicine in simple terms", key=f"ai_simplify_btn_{key_prefix}"):
             with st.spinner(f"Simplifying with {provider}..."):
                 simplified, error = simplify_ai_explanation(context, provider, api_key, lang=lang)
             if error:
@@ -1937,7 +1944,7 @@ def render_ai_assistant_section(matched_med, external_data, lang="en"):
         )
 
 
-def render_verification_results(matched_med, match_type, confidence, match_reason, barcodes, ocr_text, external_data=None, lang="en"):
+def render_verification_results(matched_med, match_type, confidence, match_reason, barcodes, ocr_text, external_data=None, lang="en", key_prefix="default"):
     if matched_med:
         badge_by_type = {
             "BARCODE": f'<span class="badge-barcode">MATCH TYPE: EXACT BARCODE ({confidence}%)</span>',
@@ -2040,7 +2047,7 @@ def render_verification_results(matched_med, match_type, confidence, match_reaso
     if external_data:
         render_external_data_cards(external_data)
 
-    render_ai_assistant_section(matched_med, external_data, lang=lang)
+    render_ai_assistant_section(matched_med, external_data, lang=lang, key_prefix=key_prefix)
 
     render_mil_guide(lang=lang)
 
