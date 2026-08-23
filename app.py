@@ -1998,13 +1998,16 @@ def main():
 
                 # --- Voice Readout ---
                 if GTTS_AVAILABLE:
-                    if st.button("🔊 Read Aloud Safety Summary", key="voice_scan"):
+                    if st.button("🔊 Read Aloud Full Safety Summary", key="voice_scan"):
                         with st.spinner("Generating audio summary..."):
-                            audio_bytes = generate_voice_summary(matched_med, ocr_text, flagged_claims, lang=lang)
+                            audio_bytes = generate_voice_summary(
+                                matched_med, ocr_text, flagged_claims, lang=lang,
+                                external_data=external_data,
+                            )
                         if audio_bytes:
                             st.audio(audio_bytes, format="audio/mp3")
                         else:
-                            st.warning("Could not generate audio. Check gTTS installation.")
+                            st.warning("Could not generate audio. Check gTTS installation and internet connection.")
 
                 render_verification_results(
                     matched_med=matched_med,
@@ -2073,6 +2076,20 @@ def main():
 
                 st.divider()
 
+                # --- Voice Readout ---
+                flagged_claims_camera = run_claim_audit(ocr_text)
+                if GTTS_AVAILABLE:
+                    if st.button("🔊 Read Aloud Full Safety Summary", key="voice_camera"):
+                        with st.spinner("Generating audio summary..."):
+                            audio_bytes = generate_voice_summary(
+                                matched_med, ocr_text, flagged_claims_camera, lang=lang,
+                                external_data=external_data,
+                            )
+                        if audio_bytes:
+                            st.audio(audio_bytes, format="audio/mp3")
+                        else:
+                            st.warning("Could not generate audio. Check gTTS installation and internet connection.")
+
                 render_verification_results(
                     matched_med=matched_med,
                     match_type=match_type,
@@ -2103,6 +2120,18 @@ def main():
             
             render_external_data_cards(external_direct)
             render_ai_assistant_section(None, external_direct, lang=lang, key_prefix="search")
+
+            if GTTS_AVAILABLE:
+                if st.button("🔊 Read Aloud Full Safety Summary", key="voice_search"):
+                    with st.spinner("Generating audio summary..."):
+                        audio_bytes = generate_voice_summary(
+                            None, search_query, [], lang=lang,
+                            external_data=external_direct,
+                        )
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3")
+                    else:
+                        st.warning("Could not generate audio. Check gTTS installation and internet connection.")
 
         st.divider()
         st.markdown("#### 📚 Local / Remote Verified Records")
