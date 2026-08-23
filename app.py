@@ -1363,42 +1363,59 @@ COMMON_DRUGS_FOR_SIMULATOR = [
 
 DEBUNK_FEED = [
     {
-        "drug": "Th\u1ea7n D\u01b0\u1ee3c X\u01b0\u01a1ng Kh\u1edbp",
-        "claim": "Ch\u1eefa 100% b\u1ec7nh x\u01b0\u01a1ng kh\u1edbp trong 7 ng\u00e0y",
-        "verdict": "\u274c GI\u1ea2 M\u1ea0O",
+        "drug_vi": "Thần Dược Xương Khớp",
+        "drug_en": "\"Miracle\" Joint & Bone Cure",
+        "claim_vi": "Chữa 100% bệnh xương khớp trong 7 ngày",
+        "claim_en": "Cures 100% of joint and bone diseases in 7 days",
+        "verdict_code": "fake",
         "color": "#DC2626",
-        "reason": "Kh\u00f4ng c\u00f3 s\u1ed1 \u0111\u0103ng k\u00fd VD/VS. Tuy\u00ean b\u1ed1 ch\u1eefa kh\u1ecfi 100% vi ph\u1ea1m lu\u1eadt qu\u1ea3ng c\u00e1o d\u01b0\u1ee3c ph\u1ea9m.",
+        "reason_vi": "Không có số đăng ký VD/VS. Tuyên bố chữa khỏi 100% vi phạm luật quảng cáo dược phẩm.",
+        "reason_en": "No VD/VS registration number. The '100% cure' claim violates pharmaceutical advertising law.",
         "reports": 142,
         "date": "2026-08-15",
     },
     {
-        "drug": "NaturePower Detox Plus",
-        "claim": "No side effects, cures all toxins in body",
-        "verdict": "\u26a0\ufe0f UNVERIFIED",
+        "drug_vi": "NaturePower Detox Plus",
+        "drug_en": "NaturePower Detox Plus",
+        "claim_vi": "Không tác dụng phụ, thải độc toàn bộ cơ thể",
+        "claim_en": "No side effects, cures all toxins in body",
+        "verdict_code": "unverified",
         "color": "#D97706",
-        "reason": "No GS1 barcode. No FDA registration. 'No side effects' claim flagged.",
+        "reason_vi": "Không có mã vạch GS1. Không có đăng ký FDA. Tuyên bố 'không tác dụng phụ' bị gắn cờ nghi vấn.",
+        "reason_en": "No GS1 barcode. No FDA registration. 'No side effects' claim flagged.",
         "reports": 87,
         "date": "2026-08-18",
     },
     {
-        "drug": "Th\u1ea3o D\u01b0\u1ee3c B\u00e1ch B\u1ec7nh",
-        "claim": "Th\u1ea7n k\u1ef3, ch\u1eefa b\u00e1ch b\u1ec7nh, kh\u00f4ng c\u1ea7n \u0111\u01a1n thu\u1ed1c",
-        "verdict": "\u274c GI\u1ea2 M\u1ea0O",
+        "drug_vi": "Thảo Dược Bách Bệnh",
+        "drug_en": "\"Cure-All\" Herbal Remedy",
+        "claim_vi": "Thần kỳ, chữa bách bệnh, không cần đơn thuốc",
+        "claim_en": "Miraculous, cures all diseases, no prescription needed",
+        "verdict_code": "fake",
         "color": "#DC2626",
-        "reason": "C\u1ee5m t\u1eeb b\u1ecb c\u1ea5m theo Th\u00f4ng t\u01b0 09/2015/TT-BYT. Kh\u00f4ng t\u00ecm th\u1ea5y trong c\u01a1 s\u1edf d\u1eef li\u1ec7u B\u1ed9 Y t\u1ebf.",
+        "reason_vi": "Cụm từ bị cấm theo Thông tư 09/2015/TT-BYT. Không tìm thấy trong cơ sở dữ liệu Bộ Y tế.",
+        "reason_en": "Phrasing prohibited under Circular 09/2015/TT-BYT (Vietnam MOH). Not found in the Ministry of Health database.",
         "reports": 231,
         "date": "2026-08-20",
     },
     {
-        "drug": "Slim Fast Wonder Pill VN",
-        "claim": "Guaranteed weight loss 10kg in 2 weeks",
-        "verdict": "\u274c FAKE",
+        "drug_vi": "Slim Fast Wonder Pill VN",
+        "drug_en": "Slim Fast Wonder Pill VN",
+        "claim_vi": "Cam kết giảm 10kg trong 2 tuần",
+        "claim_en": "Guaranteed weight loss 10kg in 2 weeks",
+        "verdict_code": "fake",
         "color": "#DC2626",
-        "reason": "Product not found in OpenFDA or MOH database. Guaranteed claims are illegal.",
+        "reason_vi": "Không tìm thấy sản phẩm trong cơ sở dữ liệu OpenFDA hoặc Bộ Y tế. Cam kết hiệu quả tuyệt đối là bất hợp pháp.",
+        "reason_en": "Product not found in OpenFDA or MOH database. Guaranteed claims are illegal.",
         "reports": 56,
         "date": "2026-08-22",
     },
 ]
+
+DEBUNK_VERDICT_LABELS = {
+    "fake": {"en": "\u274c FAKE", "vi": "\u274c GI\u1ea2 M\u1ea0O"},
+    "unverified": {"en": "\u26a0\ufe0f UNVERIFIED", "vi": "\u26a0\ufe0f CH\u01afA X\u00c1C MINH"},
+}
 
 
 def annotate_xray_lens(
@@ -1616,32 +1633,44 @@ def generate_voice_summary(matched_med: dict, ocr_text: str, flagged: list, lang
         return None
 
 
-def render_debunk_feed():
-    """Render the public community debunk feed tab."""
-    st.markdown("### 📢 Community Debunk Feed")
-    st.caption("Live-simulated public alert feed of suspicious or unregistered products reported by the community.")
+def render_debunk_feed(lang: str = "en"):
+    """Render the public community debunk feed tab, fully bilingual (EN/VI)."""
+    title = "### 📢 Community Debunk Feed" if lang == "en" else "### 📢 Bảng Tin Cộng Đồng Vạch Trần"
+    caption = (
+        "Live-simulated public alert feed of suspicious or unregistered products reported by the community."
+        if lang == "en" else
+        "Bảng tin cảnh báo mô phỏng theo thời gian thực về các sản phẩm đáng ngờ hoặc chưa đăng ký, do cộng đồng báo cáo."
+    )
+    claim_label = "Claim" if lang == "en" else "Tuyên bố"
+    reports_label = "community reports" if lang == "en" else "lượt báo cáo từ cộng đồng"
+
+    st.markdown(title)
+    st.caption(caption)
     for item in DEBUNK_FEED:
         color = item["color"]
+        drug = item["drug_en"] if lang == "en" else item["drug_vi"]
+        claim = item["claim_en"] if lang == "en" else item["claim_vi"]
+        reason = item["reason_en"] if lang == "en" else item["reason_vi"]
+        verdict = DEBUNK_VERDICT_LABELS[item["verdict_code"]][lang]
         st.markdown(
             f"""
 <div style="background:#1E1E2E;border-left:5px solid {color};border-radius:12px;
      padding:1rem 1.25rem;margin-bottom:1rem;color:#E2E8F0;">
   <div style="display:flex;justify-content:space-between;align-items:center;">
-    <span style="font-weight:800;font-size:1.05rem;color:#F1F5F9;">💊 {item['drug']}</span>
+    <span style="font-weight:800;font-size:1.05rem;color:#F1F5F9;">💊 {drug}</span>
     <span style="background:{color};color:white;font-size:0.75rem;padding:3px 10px;
-           border-radius:9999px;font-weight:700;">{item['verdict']}</span>
+           border-radius:9999px;font-weight:700;">{verdict}</span>
   </div>
   <div style="margin-top:0.4rem;font-size:0.88rem;color:#94A3B8;font-style:italic;">
-    Claim: "{item['claim']}"
+    {claim_label}: "{claim}"
   </div>
-  <div style="margin-top:0.5rem;font-size:0.88rem;color:#CBD5E1;">{item['reason']}</div>
+  <div style="margin-top:0.5rem;font-size:0.88rem;color:#CBD5E1;">{reason}</div>
   <div style="margin-top:0.5rem;font-size:0.78rem;color:#64748B;">
-    🚨 {item['reports']} community reports · 📅 {item['date']}
+    🚨 {item['reports']} {reports_label} · 📅 {item['date']}
   </div>
 </div>""",
             unsafe_allow_html=True,
         )
-
 
 def render_interaction_simulator(key_prefix: str = "default"):
     """Render the Drug Interaction Simulator tab."""
@@ -2205,7 +2234,7 @@ def main():
 
     # TAB 5: COMMUNITY DEBUNK FEED
     with tab_debunk:
-        render_debunk_feed()
+        render_debunk_feed(lang=lang)
 
 
 # ==========================================
