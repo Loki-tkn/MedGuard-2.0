@@ -1545,34 +1545,67 @@ def generate_debunk_card(drug_name: str, match_type, confidence, flagged_phrases
     return buf.read()
 
 
-def generate_voice_summary(matched_med: dict, ocr_text: str, flagged: list, lang: str = "en") -> bytes | None:
-    """Generate a gTTS audio summary. Returns audio bytes or None."""
+def generate_voice_summary(matched_med: dict, ocr_text: str, flagged: list, lang: str = "en", external_data: dict = None) -> bytes | None:
+    """
+    Generate a full gTTS audio summary for blind/low-vision users. Reads out
+    everything a sighted user would see on screen: drug name, active
+    ingredient, dosage, USES, CONTRAINDICATIONS (local DB), and official FDA
+    WARNINGS/INTERACTIONS when available — not just the name and dosage.
+    Returns audio bytes, or None if gTTS is unavailable or generation fails.
+    """
     if not GTTS_AVAILABLE:
         return None
     try:
         drug_name = matched_med.get("drug_name", "Unknown") if matched_med else "Unknown"
         active = matched_med.get("active_ingredient", "N/A") if matched_med else "N/A"
         dosage = matched_med.get("dosage", "N/A") if matched_med else "N/A"
+        uses = matched_med.get("uses", "") if matched_med else ""
+        contraindications = matched_med.get("contraindications", "") if matched_med else ""
+
+        fda = (external_data or {}).get("openfda") or {}
+        fda_warnings = fda.get("warnings", "")
+        fda_interactions = fda.get("interactions", "")
+
         if lang == "vi":
-            summary = (
-                f"Kết quả kiểm tra thuốc: {drug_name}. "
-                f"Hoạt chất: {active}. "
-                f"Liều dùng: {dosage}. "
-            )
+            parts = [
+                f"Kết quả kiểm tra thuốc: {drug_name}.",
+                f"Hoạt chất: {active}.",
+                f"Liều dùng: {dosage}.",
+            ]
+            if uses:
+                parts.append(f"Công dụng: {uses}.")
+            if contraindications:
+                parts.append(f"Chống chỉ định: {contraindications}.")
+            if fda_warnings:
+                parts.append(f"Cảnh báo từ FDA: {fda_warnings}.")
+            if fda_interactions:
+                parts.append(f"Tương tác thuốc: {fda_interactions}.")
             if flagged:
-                summary += f"Cảnh báo: Phát hiện {len(flagged)} cụm từ đáng ngờ trong nhãn thuốc. "
-            summary += "Vui lòng tham khảo ý kiến bác sĩ hoặc dược sĩ trước khi sử dụng."
+                parts.append(f"Cảnh báo: Phát hiện {len(flagged)} cụm từ đáng ngờ trong nhãn thuốc.")
+            parts.append("Vui lòng tham khảo ý kiến bác sĩ hoặc dược sĩ trước khi sử dụng.")
             tts_lang = "vi"
         else:
-            summary = (
-                f"Medicine verification result: {drug_name}. "
-                f"Active ingredient: {active}. "
-                f"Dosage: {dosage}. "
-            )
+            parts = [
+                f"Medicine verification result: {drug_name}.",
+                f"Active ingredient: {active}.",
+                f"Dosage: {dosage}.",
+            ]
+            if uses:
+                parts.append(f"Uses: {uses}.")
+            if contraindications:
+                parts.append(f"Contraindications: {contraindications}.")
+            if fda_warnings:
+                parts.append(f"FDA warnings: {fda_warnings}.")
+            if fda_interactions:
+                parts.append(f"Drug interactions: {fda_interactions}.")
             if flagged:
-                summary += f"Warning: {len(flagged)} suspicious marketing claim(s) detected on the label. "
-            summary += "Please consult a pharmacist or doctor before use."
+                parts.append(f"Warning: {len(flagged)} suspicious marketing claim(s) detected on the label.")
+            parts.append("Please consult a pharmacist or doctor before use.")
             tts_lang = "en"
+
+        summary = " ".join(parts)
+        if len(summary) > 3000:
+            summary = summary[:3000] + "..."
 
         tts = gTTS(text=summary, lang=tts_lang, slow=False)
         buf = io.BytesIO()
