@@ -1799,7 +1799,7 @@ def main():
         st.markdown('<div class="sidebar-eyebrow">Preferences</div>', unsafe_allow_html=True)
         st.markdown("### 🌍 Language / Ngôn ngữ")
         lang_choice = st.radio(
-            label="",
+            label="Choose languages",
             options=["🇬🇧 English", "🇻🇳 Tiếng Việt"],
             index=0 if st.session_state["lang"] == "en" else 1,
             horizontal=True,
